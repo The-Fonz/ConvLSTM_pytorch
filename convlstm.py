@@ -1,3 +1,4 @@
+import numpy as np
 import torch.nn as nn
 from torch.autograd import Variable
 import torch
@@ -5,7 +6,7 @@ import torch
 
 class ConvLSTMCell(nn.Module):
 
-    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias):
+    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias, use_cuda):
         """
         Initialize ConvLSTM cell.
         
@@ -21,6 +22,8 @@ class ConvLSTMCell(nn.Module):
             Size of the convolutional kernel.
         bias: bool
             Whether or not to add the bias.
+        use_cuda: bool
+            Whether or not to put tensors on GPU
         """
 
         super(ConvLSTMCell, self).__init__()
@@ -33,6 +36,8 @@ class ConvLSTMCell(nn.Module):
         self.padding     = kernel_size[0] // 2, kernel_size[1] // 2
         self.bias        = bias
         
+        self.use_cuda = use_cuda
+        
         self.conv = nn.Conv2d(in_channels=self.input_dim + self.hidden_dim,
                               out_channels=4 * self.hidden_dim,
                               kernel_size=self.kernel_size,
@@ -42,8 +47,8 @@ class ConvLSTMCell(nn.Module):
     def forward(self, input_tensor, cur_state):
         
         h_cur, c_cur = cur_state
-        
-        combined = torch.cat([input_tensor, h_cur], dim=1)  # concatenate along channel axis
+
+        combined = torch.cat((input_tensor, h_cur), dim=1)  # concatenate along channel axis
         
         combined_conv = self.conv(combined)
         cc_i, cc_f, cc_o, cc_g = torch.split(combined_conv, self.hidden_dim, dim=1) 
@@ -58,21 +63,45 @@ class ConvLSTMCell(nn.Module):
         return h_next, c_next
 
     def init_hidden(self, batch_size):
-        return (Variable(torch.zeros(batch_size, self.hidden_dim, self.height, self.width)).cuda(),
-                Variable(torch.zeros(batch_size, self.hidden_dim, self.height, self.width)).cuda())
+        hidden_states = (Variable(torch.zeros(batch_size, self.hidden_dim, self.height, self.width)),
+                         Variable(torch.zeros(batch_size, self.hidden_dim, self.height, self.width)))
+        if self.use_cuda:
+            hidden_states = [hs.cuda() for hs in hidden_states]
+        return hidden_states
 
 
 class ConvLSTM(nn.Module):
 
     def __init__(self, input_size, input_dim, hidden_dim, kernel_size, num_layers,
-                 batch_first=False, bias=True, return_all_layers=False):
+                 batch_first=False, bias=True, return_all_layers=False, use_cuda=False):
+        """
+        Multi-layer unrolled Convolutional LSTM implementation.
+        
+        Parameters
+        ----------
+        input_size: (int, int)
+            Height and width of input tensor as (height, width).
+        input_dim: int
+            Number of channels of input tensor.
+        hidden_dim: int
+            Number of channels of hidden state.
+        kernel_size: int or (int, int) or ((int, int), ...) where len == num_layers
+            Size of the convolutional kernel. Can be a single int for square kernel size equal for all layers,
+            (int, int) for rectangular kernel equal for all layers, or a fully-specified list of tuples with first
+            dimension equal to num_layers.
+        bias: bool
+            Whether or not to add the bias.
+        use_cuda: bool
+            Whether or not to put tensors on GPU (using nn.Module.cuda() does not work here, we are initializing
+            hidden states during .forward(), which is nice because it gives us a flexible sequence length).
+        """
         super(ConvLSTM, self).__init__()
 
         self._check_kernel_size_consistency(kernel_size)
 
         # Make sure that both `kernel_size` and `hidden_dim` are lists having len == num_layers
-        kernel_size = self._extend_for_multilayer(kernel_size, num_layers)
-        hidden_dim  = self._extend_for_multilayer(hidden_dim, num_layers)
+        kernel_size = self._extend_for_multilayer_kernel(kernel_size, num_layers)
+        hidden_dim  = self._extend_for_multilayer_dim(hidden_dim, num_layers)
         if not len(kernel_size) == len(hidden_dim) == num_layers:
             raise ValueError('Inconsistent list length.')
 
@@ -94,7 +123,8 @@ class ConvLSTM(nn.Module):
                                           input_dim=cur_input_dim,
                                           hidden_dim=self.hidden_dim[i],
                                           kernel_size=self.kernel_size[i],
-                                          bias=self.bias))
+                                          bias=self.bias,
+                                          use_cuda=use_cuda))
 
         self.cell_list = nn.ModuleList(cell_list)
 
@@ -104,7 +134,7 @@ class ConvLSTM(nn.Module):
         Parameters
         ----------
         input_tensor: todo 
-            5-D Tensor either of shape (t, b, c, h, w) or (b, t, c, h, w)
+            5-D Tensor either of shape (t, b, c, h, w) or (b, t, c, h, w) where t is sequence length
         hidden_state: todo
             None. todo implement stateful
             
@@ -163,7 +193,25 @@ class ConvLSTM(nn.Module):
             raise ValueError('`kernel_size` must be tuple or list of tuples')
 
     @staticmethod
-    def _extend_for_multilayer(param, num_layers):
-        if not isinstance(param, list):
-            param = [param] * num_layers
-        return param
+    def _extend_for_multilayer_dim(param, num_layers):
+        try:
+            len(param)
+            # If sequence, return it
+            return list(param)
+        except TypeError:
+            # Extend it to a sequence with num_layers length
+            return [param] * num_layers
+    
+    @staticmethod
+    def _extend_for_multilayer_kernel(param, num_layers):
+        try:
+            # Verify if it's a sequence
+            len(param)
+            # It already is a list of tuples per layer
+            if np.array(param).ndim == 2:
+                return param
+            # If not, we need to copy it num_layers times
+            return [param] * num_layers
+        except TypeError:
+            # One value was given for a square kernel size equal for each layer
+            return [[param]*2 for i in range(num_layers)]
