@@ -34,36 +34,57 @@ class ConvLSTMCell(nn.Module):
 
         self.kernel_size = kernel_size
         self.padding     = kernel_size[0] // 2, kernel_size[1] // 2
-        self.bias        = bias
+        self.use_bias        = bias
         
         self.use_cuda = use_cuda
-        
+        # Don't use built-in bias of conv layers
+        # self.conv.weights have shape (hidden_dim*4, input_dim+hidden_dim, kernel_w, kernel_h)
         self.conv = nn.Conv2d(in_channels=self.input_dim + self.hidden_dim,
                               out_channels=4 * self.hidden_dim,
                               kernel_size=self.kernel_size,
                               padding=self.padding,
-                              bias=self.bias)
+                              bias=False)
+        # Set weights to something sane
+        self.conv.weight.data.normal_(0, .01)
+        
+        # Use our own separate bias Variables
+        # Order is (i, f, o, g)
+        # Make sure everything is *i*nput to the state, nothing is *f*orgotten,
+        # everything is *o*utput, and no bias for candidate C
+        #TODO: These are put through a sigmoid so 1 does not have special value. Get more sane defaults?
+        self.bias = Variable(torch.FloatTensor([1,1,1,0]), requires_grad=True)
+        
+        if self.use_cuda:
+            self.conv.cuda()
+            self.bias.cuda()
 
     def forward(self, input_tensor, cur_state):
         
         h_cur, c_cur = cur_state
+#         print('c_cur', c_cur)
 
         try:
+            # TODO: Add optional peepholes like in original nowcasting paper
             combined = torch.cat((input_tensor, h_cur), dim=1)  # concatenate along channel axis
         # More useful notification for this common error
         except TypeError as e:
-            raise Warning("TypeError when concatenating, you've probably given an incorrect tensor type."
+            raise Warning("TypeError when concatenating, you've probably given an incorrect tensor type. "
                           "Tried to concatenate input_tensor {} and h_cur {}"
                           .format(type(input_tensor.data), type(h_cur.data)))
         
         combined_conv = self.conv(combined)
         cc_i, cc_f, cc_o, cc_g = torch.split(combined_conv, self.hidden_dim, dim=1) 
-        i = torch.sigmoid(cc_i)
-        f = torch.sigmoid(cc_f)
-        o = torch.sigmoid(cc_o)
-        g = torch.tanh(cc_g)
-
+        i = torch.sigmoid(cc_i + self.bias[0])
+#         print("i", i)
+        f = torch.sigmoid(cc_f + self.bias[1])
+#         print("f", f)
+        o = torch.sigmoid(cc_o + self.bias[2])
+#         print("cc_g", cc_g)
+        g = torch.tanh(cc_g + self.bias[3])
+#         print('g', g)
+        
         c_next = f * c_cur + i * g
+#         print('c_next', c_next)
         h_next = o * torch.tanh(c_next)
         
         return h_next, c_next
