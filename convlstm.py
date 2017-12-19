@@ -55,8 +55,10 @@ class ConvLSTMCell(nn.Module):
         self.bias = Variable(torch.FloatTensor([1,1,1,0]), requires_grad=True)
         
         if self.use_cuda:
+            # Module puts tensors on GPU in-place
             self.conv.cuda()
-            self.bias.cuda()
+            # Variable.cuda() returns a copy of the variable-wrapped tensor on GPU
+            self.bias = self.bias.cuda()
 
     def forward(self, input_tensor, cur_state):
         
@@ -73,6 +75,7 @@ class ConvLSTMCell(nn.Module):
                           .format(type(input_tensor.data), type(h_cur.data)))
         
         combined_conv = self.conv(combined)
+        # TODO: Add peepholes, where i, f, o (elementwise) are dependent on c_cur
         cc_i, cc_f, cc_o, cc_g = torch.split(combined_conv, self.hidden_dim, dim=1) 
         i = torch.sigmoid(cc_i + self.bias[0])
 #         print("i", i)
@@ -215,9 +218,8 @@ class ConvLSTM(nn.Module):
 
     @staticmethod
     def _check_kernel_size_consistency(kernel_size):
-        if not (isinstance(kernel_size, tuple) or
-                    (isinstance(kernel_size, list) and all([isinstance(elem, tuple) for elem in kernel_size]))):
-            raise ValueError('`kernel_size` must be tuple or list of tuples')
+        if not (isinstance(kernel_size, tuple) or isinstance(kernel_size, list)):
+            raise ValueError('`kernel_size` must be tuple/list or list of lists')
 
     @staticmethod
     def _extend_for_multilayer_dim(param, num_layers):
