@@ -6,7 +6,7 @@ import torch
 
 class ConvLSTMCell(nn.Module):
 
-    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias, use_cuda):
+    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias, use_cuda, peepholes=False):
         """
         Initialize ConvLSTM cell.
         
@@ -24,6 +24,8 @@ class ConvLSTMCell(nn.Module):
             Whether or not to add the bias.
         use_cuda: bool
             Whether or not to put tensors on GPU
+        peepholes: bool
+            Use peepholes (state c_cur is dependent on i, f, o (for the latter elementwise))
         """
 
         super(ConvLSTMCell, self).__init__()
@@ -35,11 +37,15 @@ class ConvLSTMCell(nn.Module):
         self.kernel_size = kernel_size
         self.padding     = kernel_size[0] // 2, kernel_size[1] // 2
         self.use_bias        = bias
+        self.use_peepholes = peepholes
         
         self.use_cuda = use_cuda
         # Don't use built-in bias of conv layers
         # self.conv.weights have shape (hidden_dim*4, input_dim+hidden_dim, kernel_w, kernel_h)
-        self.conv = nn.Conv2d(in_channels=self.input_dim + self.hidden_dim,
+        in_channels = self.input_dim + self.hidden_dim
+        if self.use_peepholes:
+            in_channels += self.hidden_dim
+        self.conv = nn.Conv2d(in_channels=in_channels,
                               out_channels=4 * self.hidden_dim,
                               kernel_size=self.kernel_size,
                               padding=self.padding,
@@ -66,8 +72,11 @@ class ConvLSTMCell(nn.Module):
 #         print('c_cur', c_cur)
 
         try:
-            # TODO: Add optional peepholes like in original nowcasting paper
-            combined = torch.cat((input_tensor, h_cur), dim=1)  # concatenate along channel axis
+            if self.use_peepholes:
+                combined = torch.cat((input_tensor, h_cur, c_cur), dim=1)
+            else:
+                # Concatenate along channel axis
+                combined = torch.cat((input_tensor, h_cur), dim=1)
         # More useful notification for this common error
         except TypeError as e:
             raise Warning("TypeError when concatenating, you've probably given an incorrect tensor type. "
@@ -103,7 +112,7 @@ class ConvLSTMCell(nn.Module):
 class ConvLSTM(nn.Module):
 
     def __init__(self, input_size, input_dim, hidden_dim, kernel_size, num_layers,
-                 batch_first=False, bias=True, return_all_layers=False, use_cuda=False):
+                 batch_first=False, bias=True, return_all_layers=False, use_cuda=False, peepholes=False):
         """
         Multi-layer unrolled Convolutional LSTM implementation.
         
@@ -154,7 +163,8 @@ class ConvLSTM(nn.Module):
                                           hidden_dim=self.hidden_dim[i],
                                           kernel_size=self.kernel_size[i],
                                           bias=self.bias,
-                                          use_cuda=use_cuda))
+                                          use_cuda=use_cuda,
+                                          peepholes=peepholes))
 
         self.cell_list = nn.ModuleList(cell_list)
 
