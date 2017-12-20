@@ -42,16 +42,31 @@ class ConvLSTMCell(nn.Module):
         self.use_cuda = use_cuda
         # Don't use built-in bias of conv layers
         # self.conv.weights have shape (hidden_dim*4, input_dim+hidden_dim, kernel_w, kernel_h)
-        in_channels = self.input_dim + self.hidden_dim
-        if self.use_peepholes:
-            in_channels += self.hidden_dim
-        self.conv = nn.Conv2d(in_channels=in_channels,
+        self.conv = nn.Conv2d(in_channels=self.input_dim + self.hidden_dim,
                               out_channels=4 * self.hidden_dim,
                               kernel_size=self.kernel_size,
                               padding=self.padding,
                               bias=False)
         # Set weights to something sane
         self.conv.weight.data.normal_(0, .01)
+        
+        if self.use_peepholes:
+            # i, f gates are dependent on c_cur
+            self.conv_peep_i_f = nn.Conv2d(in_channels=self.hidden_dim,
+                              out_channels=2 * self.hidden_dim,
+                              kernel_size=self.kernel_size,
+                              padding=self.padding,
+                              bias=False)
+            # o is dependent on c_cur elementwise
+            self.conv_peep_o = nn.Conv2d(in_channels=self.hidden_dim,
+                              out_channels=self.hidden_dim,
+                              kernel_size=[1,1],
+                              padding=0,
+                              bias=False)
+            # Set weights to something sane
+            self.conv_peep_i_f.weight.data.normal_(0, .01)
+            self.conv_peep_o.weight.data.normal_(0, .01)
+            
         
         # Use our own separate bias Variables
         # Order is (i, f, o, g)
@@ -63,20 +78,19 @@ class ConvLSTMCell(nn.Module):
         if self.use_cuda:
             # Module puts tensors on GPU in-place
             self.conv.cuda()
+            if self.use_peepholes:
+                self.conv_peep_i_f.cuda()
+                self.conv_peep_o.cuda()
             # Variable.cuda() returns a copy of the variable-wrapped tensor on GPU
             self.bias = self.bias.cuda()
 
     def forward(self, input_tensor, cur_state):
         
         h_cur, c_cur = cur_state
-#         print('c_cur', c_cur)
 
         try:
-            if self.use_peepholes:
-                combined = torch.cat((input_tensor, h_cur, c_cur), dim=1)
-            else:
-                # Concatenate along channel axis
-                combined = torch.cat((input_tensor, h_cur), dim=1)
+            # Concatenate along channel axis
+            combined = torch.cat((input_tensor, h_cur), dim=1)
         # More useful notification for this common error
         except TypeError as e:
             raise Warning("TypeError when concatenating, you've probably given an incorrect tensor type. "
@@ -84,19 +98,26 @@ class ConvLSTMCell(nn.Module):
                           .format(type(input_tensor.data), type(h_cur.data)))
         
         combined_conv = self.conv(combined)
-        # TODO: Add peepholes, where i, f, o (elementwise) are dependent on c_cur
+        # Based on input and hidden state
         cc_i, cc_f, cc_o, cc_g = torch.split(combined_conv, self.hidden_dim, dim=1) 
-        i = torch.sigmoid(cc_i + self.bias[0])
-#         print("i", i)
-        f = torch.sigmoid(cc_f + self.bias[1])
-#         print("f", f)
-        o = torch.sigmoid(cc_o + self.bias[2])
-#         print("cc_g", cc_g)
-        g = torch.tanh(cc_g + self.bias[3])
-#         print('g', g)
+        
+        if self.use_peepholes:
+            # Optional peepholes where i, f are dependent on c_cur...
+            cc_i_peep, cc_f_peep = torch.split(self.conv_peep_i_f(c_cur), self.hidden_dim, dim=1)
+            # ...and o is dependent on c_cur but elementwise (1x1 convolution)
+            cc_o_peep = self.conv_peep_o(c_cur)
+            i = torch.sigmoid(cc_i + cc_i_peep + self.bias[0])
+            f = torch.sigmoid(cc_f + cc_f_peep + self.bias[1])
+            o = torch.sigmoid(cc_o + cc_o_peep + self.bias[2])
+            g = torch.tanh(cc_g + self.bias[3])
+        else:
+            # Standard calculations without peepholes
+            i = torch.sigmoid(cc_i + self.bias[0])
+            f = torch.sigmoid(cc_f + self.bias[1])
+            o = torch.sigmoid(cc_o + self.bias[2])
+            g = torch.tanh(cc_g + self.bias[3])
         
         c_next = f * c_cur + i * g
-#         print('c_next', c_next)
         h_next = o * torch.tanh(c_next)
         
         return h_next, c_next
